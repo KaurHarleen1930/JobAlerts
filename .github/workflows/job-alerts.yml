@@ -2,15 +2,14 @@ name: Job Alerts (Hourly Email)
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 * * * *"   # every hour (UTC)
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read   # no repo writes needed
 
-# prevent overlapping runs from racing the push
 concurrency:
-  group: job-alerts-main
+  group: job-alerts-hourly
   cancel-in-progress: false
 
 jobs:
@@ -18,14 +17,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Restore cached seen.json (most recent)
+      - name: Restore seen.json cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
-          persist-credentials: true
+          path: seen.json
+          key: seen-${{ runner.os }}-${{ github.ref_name }}-bootstrap
+          restore-keys: |
+            seen-${{ runner.os }}-${{ github.ref_name }}-
+            seen-${{ runner.os }}-
+
+      # If cache missed, create an empty seen.json so the script can run
+      - name: Ensure seen.json exists
+        run: |
+          if [ ! -f seen.json ]; then
+            echo "[]" > seen.json
+          fi
+          echo "Initial seen.json:"
+          cat seen.json
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: |
+
+      - name: Install deps
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run monitor
         run: python monitor.py
         env:
@@ -33,21 +54,9 @@ jobs:
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           TO_EMAIL:  ${{ secrets.TO_EMAIL }}
 
-      # ⬇️ UPDATED STEP
-      - name: Persist seen.json if changed
-        run: |
-          if [[ -n "$(git status --porcelain seen.json)" ]]; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-            # make sure we're up-to-date before pushing
-            git fetch origin
-            git checkout main
-            git pull --rebase origin main
-
-            git add seen.json
-            git commit -m "chore: update seen.json [skip ci]" || echo "No changes to commit"
-            git push origin HEAD:main
-          else
-            echo "seen.json unchanged; nothing to push."
-          fi
+      # Save updated seen.json to a NEW cache key (restore picks the latest by prefix)
+      - name: Save seen.json cache
+        uses: actions/cache/save@v4
+        with:
+          path: seen.json
+          key: seen-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
