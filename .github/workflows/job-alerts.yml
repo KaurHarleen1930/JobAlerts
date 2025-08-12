@@ -2,11 +2,16 @@ name: Job Alerts (Hourly Email)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour on the hour (UTC)
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# prevent overlapping runs from racing the push
+concurrency:
+  group: job-alerts-main
+  cancel-in-progress: false
 
 jobs:
   scan:
@@ -27,12 +32,22 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           TO_EMAIL:  ${{ secrets.TO_EMAIL }}
+
+      # ⬇️ UPDATED STEP
       - name: Persist seen.json if changed
         run: |
           if [[ -n "$(git status --porcelain seen.json)" ]]; then
             git config --global user.name "github-actions[bot]"
             git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            # make sure we're up-to-date before pushing
+            git fetch origin
+            git checkout main
+            git pull --rebase origin main
+
             git add seen.json
-            git commit -m "Update seen.json [skip ci]"
-            git push
+            git commit -m "chore: update seen.json [skip ci]" || echo "No changes to commit"
+            git push origin HEAD:main
+          else
+            echo "seen.json unchanged; nothing to push."
           fi
