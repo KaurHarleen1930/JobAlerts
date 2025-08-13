@@ -246,13 +246,18 @@ with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
     server.sendmail(SENDER, RECIPIENT, msg.as_string())
 """
 
+
+
+
 import os, re, json, time, hashlib, smtplib
+from typing import List, Dict, Any, Tuple
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import List, Dict, Any
+
 import requests
+from bs4 import BeautifulSoup
 
-
+# ========= CONFIG =========
 KEYWORDS = [
     "software", "software engineer", "backend", "full stack",
     "machine learning", "ml", "ai", "llm", "generative ai",
@@ -260,44 +265,62 @@ KEYWORDS = [
 ]
 EXCLUDE = ["intern", "internship", "unpaid"]
 
-US_PHRASES = ["united states", "united states of america", "usa", "us", "u.s."]
+# ✅ Expanded set of U.S. variants (we normalize heavily before matching)
+US_VARIANTS = {
+    "usa", "u s a", "u.s.a", "u.s.a.", "u-s-a",
+    "us", "u s", "u.s.", "u.s", "u-s",
+    "united states", "united-states", "united  states",
+    "united states of america", "united-states-of-america",
+}
 
 TIMEOUT = 25
-UA = {"User-Agent": "job-alerts-bot/1.0 (+github actions)"}
-SEEN_PATH = "seen.json"
+HEADERS = {"User-Agent": "job-alerts-bot/2.0 (+github actions)"}
 
+SEEN_PATH = "seen.json"
 SENDER = os.environ["GMAIL_USER"]
 PASS   = os.environ["GMAIL_PASS"]
 TO     = os.environ["TO_EMAIL"]
 
-# ====== UTIL ======
+# ========= HELPERS =========
 def norm(s: str) -> str:
     return (s or "").strip()
 
-def yes(s: str, needles: List[str]) -> bool:
+def any_in(s: str, needles: List[str]) -> bool:
     s = (s or "").lower()
     return any(n in s for n in needles)
 
-def no(s: str, needles: List[str]) -> bool:
-    s = (s or "").lower()
-    return not any(n in s for n in needles)
-
 def kw_match(title: str) -> bool:
     t = (title or "").lower()
-    return yes(t, KEYWORDS) and no(t, EXCLUDE)
+    return any_in(t, KEYWORDS) and not any_in(t, EXCLUDE)
 
-def is_us(loc_text: str) -> bool:
-    return yes(loc_text, US_PHRASES)
+def _normalize_loc_for_match(loc: str) -> str:
+    """
+    Normalize location strings so 'Seattle, WA, USA' -> 'seattle wa usa',
+    'United States of America' -> 'united states of america', 'U.S.' -> 'u s'.
+    """
+    s = (loc or "").lower()
+    # make 'remote - us', 'us (remote)' etc easy to catch
+    s = s.replace("–", "-").replace("—", "-")
+    # turn punctuation into spaces, keep letters/numbers
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-def dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen = set()
-    out = []
-    for it in items:
-        k = (it.get("company",""), it.get("title",""), it.get("link",""))
-        if k not in seen:
-            seen.add(k)
-            out.append(it)
-    return out
+def is_us_or_remote(loc: str) -> bool:
+    # always allow explicit remote anywhere
+    if "remote" in (loc or "").lower():
+        return True
+    s = _normalize_loc_for_match(loc)
+    # match against many US variants after normalization
+    for v in US_VARIANTS:
+        if v in s:
+            return True
+    # also catch state abbreviations with trailing 'usa' removed in messy cases
+    # (we already normalized, so 'seattle wa usa' would have matched via 'usa')
+    return False
+
+def jid(company: str, title: str, link: str) -> str:
+    return hashlib.sha1(f"{company}|{title}|{link}".encode("utf-8")).hexdigest()
 
 def load_seen() -> set:
     try:
@@ -310,252 +333,275 @@ def save_seen(seen: set):
     with open(SEEN_PATH, "w", encoding="utf-8") as f:
         json.dump(sorted(list(seen)), f)
 
-def jid(company: str, title: str, link: str) -> str:
-    h = hashlib.sha1(f"{company}|{title}|{link}".encode("utf-8")).hexdigest()
-    return h
-
-def get_json(method: str, url: str, **kwargs) -> Any:
+def http_json(method: str, url: str, **kwargs) -> Any:
     kwargs.setdefault("timeout", TIMEOUT)
-    kwargs.setdefault("headers", {}).update(UA)
+    kwargs.setdefault("headers", HEADERS)
     r = requests.request(method, url, **kwargs)
     r.raise_for_status()
     return r.json()
 
-# ====== ADAPTERS ======
-def fetch_amazon(querys: List[str]) -> List[Dict[str, Any]]:
-    # Amazon public JSON search
+def http_text(url: str) -> str:
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.text
+
+def dedupe(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for r in rows:
+        k = (r.get("company",""), r.get("title",""), r.get("link",""))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return out
+
+# ========= ADAPTERS =========
+def amazon_adapter() -> Tuple[str, List[Dict[str,str]]]:
     base = "https://www.amazon.jobs/en/search.json"
     results = []
-    for q in querys:
-        params = {
-            "base_query": q,
-            "country": "USA",
-        }
+    for q in ["software", "machine learning"]:
         try:
-            r = requests.get(base, params=params, headers=UA, timeout=TIMEOUT).json()
-            for j in r.get("jobs", []):
+            data = requests.get(base, params={"base_query": q, "country": "USA"},
+                                headers=HEADERS, timeout=TIMEOUT).json()
+            for j in data.get("jobs", []):
                 title = j.get("title") or ""
                 if not kw_match(title): 
                     continue
-                loc = j.get("normalized_location", "") or j.get("city_state", "")
-                # include remote
-                if not (is_us(loc.lower()) or "remote" in (loc or "").lower() or "remote" in (j.get("work_level","") or "").lower()):
+                loc = j.get("normalized_location") or j.get("city_state") or "USA"
+                if not is_us_or_remote(loc):
                     continue
-                link = "https://www.amazon.jobs" + j.get("job_path", "")
-                results.append({"company": "Amazon / AWS", "title": title, "location": loc or "USA", "link": link})
-        except Exception:
-            continue
-    return results
+                link = "https://www.amazon.jobs" + (j.get("job_path") or "")
+                results.append({
+                    "company": "Amazon / AWS",
+                    "title": title,
+                    "location": norm(loc),
+                    "link": link
+                })
+        except Exception as e:
+            return (f"amazon: error {e.__class__.__name__}", results)
+    return ("amazon: ok", results)
 
-def fetch_google(querys: List[str]) -> List[Dict[str, Any]]:
-    # Google Careers unofficial JSON feed via 'search' endpoint (stable HTML also embeds JSON; this is lighter)
-    # Fallback: simple result pages with q= + USA in query to bias US roles
+def google_adapter() -> Tuple[str, List[Dict[str,str]]]:
     results = []
-    base = "https://careers.google.com/api/v4/search/"
-    for q in querys:
+    status = "google: ok"
+    for q in ["software", "machine learning", "generative ai", "ai", "llm"]:
         try:
-            payload = {
-                "query": q,
-                "page": 1,
-                "page_size": 50,
-                "location": "United States",
-                "language": "en"
-            }
-            j = get_json("POST", base, json=payload)
-            for job in j.get("jobs", []):
-                title = job.get("title","")
-                if not kw_match(title): 
+            url = f"https://careers.google.com/jobs/results/?q={requests.utils.quote(q)}&hl=en_US"
+            html = http_text(url)
+            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">\s*(\{.*?\})\s*</script>', html, re.S)
+            if not m:
+                status = "google: no __NEXT_DATA__"
+                continue
+            data = json.loads(m.group(1))
+            def walk_find_jobs(obj):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if k == "jobs" and isinstance(v, list):
+                            return v
+                        found = walk_find_jobs(v)
+                        if found is not None: return found
+                elif isinstance(obj, list):
+                    for it in obj:
+                        found = walk_find_jobs(it)
+                        if found is not None: return found
+                return None
+            jobs = walk_find_jobs(data) or []
+            for j in jobs:
+                title = j.get("title") or j.get("name") or ""
+                if not kw_match(title):
                     continue
-                # locations is a list of dicts with "display"
-                locs = [norm(x.get("display","")) for x in job.get("locations",[])]
-                loc_text = ", ".join([x for x in locs if x]) or "USA"
-                if not (is_us(loc_text.lower()) or "remote" in loc_text.lower()):
+                locs = []
+                for l in (j.get("locations") or []):
+                    disp = l.get("display") or l.get("text") or ""
+                    if disp: locs.append(disp)
+                loc_text = ", ".join(locs) or (j.get("location", "") or "USA")
+                if not is_us_or_remote(loc_text):
                     continue
-                link = job.get("apply_url") or job.get("url") or ""
-                results.append({"company": "Google", "title": title, "location": loc_text, "link": link})
-        except Exception:
-            continue
-    return results
+                link = j.get("apply_url") or j.get("url") or j.get("canonical_url") or ""
+                if not link and j.get("id"):
+                    link = f"https://careers.google.com/jobs/results/{j['id']}/"
+                if link:
+                    results.append({
+                        "company": "Google",
+                        "title": norm(title),
+                        "location": norm(loc_text),
+                        "link": link
+                    })
+            time.sleep(0.3)
+        except Exception as e:
+            status = f"google: error {e.__class__.__name__}"
+    return (status, results)
 
-def lever(company: str, querys: List[str]) -> List[Dict[str, Any]]:
-    url = f"https://api.lever.co/v0/postings/{company}?mode=json"
+def microsoft_adapter() -> Tuple[str, List[Dict[str,str]]]:
     results = []
-    try:
-        data = get_json("GET", url)
-        for j in data:
-            title = j.get("text","")
-            if not kw_match(title): 
+    status = "microsoft: ok"
+    for q in ["software", "machine learning", "ai", "llm"]:
+        try:
+            url = f"https://jobs.careers.microsoft.com/global/en/search?q={requests.utils.quote(q)}"
+            html = http_text(url)
+            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">\s*(\{.*?\})\s*</script>', html, re.S)
+            if not m:
+                status = "microsoft: no __NEXT_DATA__"
                 continue
-            loc = (j.get("categories",{}) or {}).get("location","") or ""
-            if not (is_us(loc.lower()) or "remote" in loc.lower()):
-                continue
-            if "intern" in (j.get("lists",{}) or {}).get("commitment","").lower():
-                continue
-            results.append({"company": company.title(), "title": title, "location": loc or "USA", "link": j.get("hostedUrl","")})
-    except Exception:
-        pass
-    return results
+            data = json.loads(m.group(1))
+            def collect_jobs(obj):
+                if isinstance(obj, dict):
+                    title = obj.get("title") or obj.get("jobTitle") or ""
+                    location = obj.get("location") or obj.get("jobLocation") or ""
+                    urlpath = obj.get("url") or obj.get("navigationUrl") or obj.get("jobUrl") or ""
+                    if title and kw_match(title):
+                        if is_us_or_remote(location):
+                            link = urlpath if urlpath.startswith("http") else ("https://jobs.careers.microsoft.com" + urlpath)
+                            results.append({
+                                "company": "Microsoft",
+                                "title": norm(title),
+                                "location": norm(location) or "USA",
+                                "link": link
+                            })
+                    for v in obj.values():
+                        collect_jobs(v)
+                elif isinstance(obj, list):
+                    for it in obj:
+                        collect_jobs(it)
+            collect_jobs(data)
+            time.sleep(0.25)
+        except Exception as e:
+            status = f"microsoft: error {e.__class__.__name__}"
+    uniq = {}
+    for r in results:
+        uniq[r["link"]] = r
+    return (status, list(uniq.values()))
 
-def greenhouse(board: str, querys: List[str]) -> List[Dict[str, Any]]:
-    # Greenhouse public API
+def greenhouse_adapter(board: str, label: str) -> Tuple[str, List[Dict[str,str]]]:
     url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
     results = []
     try:
-        data = get_json("GET", url)
-        for job in data.get("jobs", []):
-            title = job.get("title","")
-            if not kw_match(title): 
-                continue
-            offices = job.get("offices") or []
-            locs = ", ".join([o.get("name","") for o in offices if o.get("name")])
-            loc_text = locs or (job.get("location",{}) or {}).get("name","") or ""
-            if not (is_us(loc_text.lower()) or "remote" in loc_text.lower()):
-                continue
-            results.append({"company": board.title(), "title": title, "location": loc_text or "USA", "link": job.get("absolute_url","")})
-    except Exception:
-        pass
-    return results
+        data = http_json("GET", url)
+        for j in data.get("jobs", []):
+            title = j.get("title","")
+            if not kw_match(title): continue
+            loc = (j.get("location",{}) or {}).get("name","") or ""
+            offices = j.get("offices") or []
+            if offices and not loc:
+                loc = ", ".join([o.get("name","") for o in offices if o.get("name")])
+            if not is_us_or_remote(loc): continue
+            results.append({
+                "company": label,
+                "title": norm(title),
+                "location": norm(loc) or "USA",
+                "link": j.get("absolute_url","")
+            })
+        return (f"greenhouse:{board}: ok", results)
+    except Exception as e:
+        return (f"greenhouse:{board}: error {e.__class__.__name__}", results)
 
-def workday(host: str, tenant: str, site: str, querys: List[str]) -> List[Dict[str, Any]]:
-    """
-    Generic Workday CxS endpoint:
-    POST https://{host}/wday/cxs/{tenant}/{site}/jobs
-    body: {"searchText":"software","locations":["United States of America"],"limit":50}
-    """
+def lever_adapter(org: str, label: str) -> Tuple[str, List[Dict[str,str]]]:
+    url = f"https://api.lever.co/v0/postings/{org}?mode=json"
     results = []
-    url = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
-    for q in querys:
+    try:
+        data = http_json("GET", url)
+        for j in data:
+            title = j.get("text","")
+            if not kw_match(title): continue
+            loc = (j.get("categories",{}) or {}).get("location","") or ""
+            if not is_us_or_remote(loc): continue
+            if any_in(title, EXCLUDE): continue
+            results.append({
+                "company": label,
+                "title": norm(title),
+                "location": norm(loc) or "USA",
+                "link": j.get("hostedUrl","")
+            })
+        return (f"lever:{org}: ok", results)
+    except Exception as e:
+        return (f"lever:{org}: error {e.__class__.__name__}", results)
+
+def workday_adapter(host: str, tenant: str, site: str, label: str) -> Tuple[str, List[Dict[str,str]]]:
+    results = []
+    status = f"workday:{label}: ok"
+    for q in ["software", "machine learning", "ai", "llm", "generative ai", "data scientist", "backend", "full stack"]:
         try:
+            url = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
             payload = {
                 "searchText": q,
                 "limit": 50,
                 "offset": 0,
-                "appliedFacets": {
-                    "locations": ["United States of America"]
-                }
+                "appliedFacets": {"locations": ["United States of America"]}  # Workday expects this exact string
             }
-            j = get_json("POST", url, json=payload)
+            j = http_json("POST", url, json=payload)
             for jp in j.get("jobPostings", []):
                 title = jp.get("title","")
-                if not kw_match(title):
-                    continue
-                # location string often already US
+                if not kw_match(title): continue
+                if any_in(jp.get("subtitle","") or "", EXCLUDE): continue
                 loc = jp.get("locationsText","") or "USA"
-                # exclude internships
-                if yes(title, EXCLUDE) or yes(jp.get("subtitle",""), EXCLUDE):
-                    continue
-                # link
-                ext_path = jp.get("externalPath","") or jp.get("bulletFields", [{}])[0].get("text","")
-                link = f"https://{host}{ext_path}" if ext_path.startswith("/") else ext_path
-                # company label
-                company = tenant.replace("-", " ").replace("_"," ").title()
-                results.append({"company": company, "title": title, "location": loc, "link": link})
-        except Exception:
-            continue
-    return results
+                if not is_us_or_remote(loc): continue
+                link = jp.get("externalPath","") or ""
+                if link and link.startswith("/"):
+                    link = f"https://{host}{link}"
+                results.append({
+                    "company": label,
+                    "title": norm(title),
+                    "location": norm(loc),
+                    "link": link
+                })
+        except Exception as e:
+            status = f"workday:{label}: error {e.__class__.__name__}"
+    uniq = {}
+    for r in results:
+        uniq[r["link"]] = r
+    return (status, list(uniq.values()))
 
-def phenomen(host: str, querys: List[str]) -> List[Dict[str, Any]]:
-    """
-    Phenom People (Accenture/Fidelity sometimes): public search API varies.
-    We hit a broad search and filter client-side.
-    """
-    results = []
-    for q in querys:
-        try:
-            r = requests.get(host, params={"search": q}, headers=UA, timeout=TIMEOUT)
-            if r.status_code != 200: 
-                continue
-            data = r.json() if "application/json" in r.headers.get("Content-Type","") else {}
-            jobs = data.get("jobs", [])
-            for j in jobs:
-                title = j.get("name","")
-                if not kw_match(title): 
-                    continue
-                loc = (j.get("location","") or "")
-                if not (is_us(loc.lower()) or "remote" in loc.lower()):
-                    continue
-                link = j.get("url","")
-                results.append({"company": "Phenom", "title": title, "location": loc or "USA", "link": link})
-        except Exception:
-            continue
-    return results
+# ========= COMPANY SOURCES =========
+def collect_all() -> Tuple[List[Dict[str,str]], List[str]]:
+    rows: List[Dict[str,str]] = []
+    notes: List[str] = []
 
-# ====== COMPANY MAP (best-known ATS endpoints) ======
-QUERY_SET = ["software", "machine learning", "ai", "llm", "generative ai", "data scientist", "backend", "full stack"]
+    # Amazon / AWS
+    s, r = amazon_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
 
-COMPANY_SOURCES = [
-    # Amazon / AWS (Amazon Jobs JSON)
-    ("Amazon Web Services (AWS)", lambda: fetch_amazon(["software", "machine learning"])),
-    ("Amazon Development Center (Amazon)", lambda: fetch_amazon(["software", "machine learning"])),
+    # Google
+    s, r = google_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Google (Careers API)
-    ("Google", lambda: fetch_google(["software", "machine learning", "generative ai", "bigquery", "ai"])),
-
-    # Microsoft (Workday-like API is private; use US region Workday endpoint via tenant 'gcs' is not public)
-    # Fallback: use Bay Area/DC/Seattle Workday CxS endpoints exposed under 'global' site.
-    ("Microsoft", lambda: workday("jobs.careers.microsoft.com", "gcs", "global", ["software", "machine learning", "ai"])),
+    # Microsoft
+    s, r = microsoft_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
 
     # Salesforce (Workday)
-    ("Salesforce", lambda: workday("salesforce.wd1.myworkdayjobs.com", "salesforce", "External_Career_Site", ["software", "machine learning", "ai"])),
+    s, r = workday_adapter("salesforce.wd1.myworkdayjobs.com", "salesforce", "External_Career_Site", "Salesforce"); rows += r; notes.append(f"{s}: {len(r)}")
 
     # Deloitte (Workday)
-    ("Deloitte Consulting", lambda: workday("apply.deloitte.com", "deloitte", "Careers", ["software", "machine learning", "ai"])),
-
-    # JPMorgan (Workday)
-    ("JPMorgan Chase", lambda: workday("jpmc.fa.oraclecloud.com", "hcmUI", "Careers", ["software", "machine learning", "ai"])),  # OracleCloud HCM often proxies Workday-like JSON; may return 403 on some runs
+    s, r = workday_adapter("apply.deloitte.com", "deloitte", "Careers", "Deloitte Consulting"); rows += r; notes.append(f"{s}: {len(r)}")
 
     # EY (Workday)
-    ("Ernst & Young (EY)", lambda: workday("careers.ey.com", "ey", "search", ["software", "machine learning", "ai"])),
+    s, r = workday_adapter("careers.ey.com", "ey", "search", "Ernst & Young (EY)"); rows += r; notes.append(f"{s}: {len(r)}")
 
     # Wipro (Workday)
-    ("Wipro", lambda: workday("wipro.wd3.myworkdayjobs.com", "Wipro", "Careers", ["software", "machine learning", "ai"])),
+    s, r = workday_adapter("wipro.wd3.myworkdayjobs.com", "Wipro", "Careers", "Wipro"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # IBM (Workday / Brassring mix; try Workday)
-    ("IBM", lambda: workday("ibm.wd5.myworkdayjobs.com", "IBM", "Careers", ["software", "machine learning", "ai"])),
+    # IBM (Workday)
+    s, r = workday_adapter("ibm.wd5.myworkdayjobs.com", "IBM", "Careers", "IBM"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Oracle (Oracle Careers portal has JSON; Workday helper may still pick some)
-    ("Oracle America", lambda: workday("careers.oracle.com", "jobs", "search", ["software", "machine learning", "ai"])),
+    # Oracle
+    s, r = workday_adapter("careers.oracle.com", "jobs", "search", "Oracle America"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Fidelity (often Phenom People JSON; fallback Workday not always open)
-    ("Fidelity (Fidelity Investments / Fidelity Technology Group)", lambda: phenomen("https://jobs.fidelity.com/api/jobs/search", ["software", "machine learning"])),
+    # Cognizant (Greenhouse)
+    s, r = greenhouse_adapter("cognizant", "Cognizant Technology Solutions"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Accenture (Phenom People)
-    ("Accenture", lambda: phenomen("https://www.accenture.com/api/sitecore/JobSearch/GetJobs", ["software", "machine learning", "ai"])),
+    # Capgemini (Greenhouse)
+    s, r = greenhouse_adapter("capgemini", "Capgemini America"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Greenhouse examples (if company uses it; Cognizant/Capgemini sometimes)
-    ("Cognizant Technology Solutions", lambda: greenhouse("cognizant", QUERY_SET)),
-    ("Capgemini America", lambda: greenhouse("capgemini", QUERY_SET)),
+    # LTIMindtree (Lever)
+    s, r = lever_adapter("ltimindtree", "LTIMindtree"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Lever examples (some orgs like LTIMindtree/HCL may not use Lever; if they do, this will pick up)
-    ("LTIMindtree", lambda: lever("ltimindtree", QUERY_SET)),
-    ("HCL America", lambda: lever("hcl", QUERY_SET)),
+    # HCL America (Lever)
+    s, r = lever_adapter("hcl", "HCL America"); rows += r; notes.append(f"{s}: {len(r)}")
 
-    # Infosys / TCS portals are custom and frequently gated; best-effort via Workday-style endpoint if open
-    ("Infosys", lambda: workday("career.infosys.com", "infosys", "joblist", ["software", "machine learning", "ai"])),
-    ("Tata Consultancy Services (TCS)", lambda: workday("ibegin.tcs.com", "tcs", "careers", ["software", "machine learning", "ai"])),
-]
+    # (Infosys / TCS / JPMorgan: custom portals; happy to add site-specific scrapers if you want)
 
-# ====== RUN SCAN ======
-def run_scan() -> List[Dict[str, str]]:
-    all_rows: List[Dict[str,str]] = []
-    for label, fn in COMPANY_SOURCES:
-        try:
-            rows = fn()
-            # Ensure company label is consistent
-            for r in rows:
-                if not r.get("company"):
-                    r["company"] = label
-                # hard US check + remote
-                if not (is_us((r.get("location") or "").lower()) or "remote" in (r.get("location") or "").lower()):
-                    continue
-                all_rows.extend(rows)
-        except Exception as e:
-            # Soft-fail and keep scanning others
-            print(f"[WARN] {label}: {e}")
-        time.sleep(0.3)
-    return dedupe(all_rows)
+    return (dedupe(rows), notes)
 
-def build_email(new_items: List[Dict[str,str]]) -> MIMEMultipart:
+# ========= EMAIL =========
+def build_email(new_items: List[Dict[str,str]], notes: List[str]) -> MIMEMultipart:
     if new_items:
         subject = f"[Job Alerts] {len(new_items)} new US postings detected"
         plain_lines = []
@@ -567,11 +613,14 @@ def build_email(new_items: List[Dict[str,str]]) -> MIMEMultipart:
                 f"<a href='{it['link']}'>{it['link']}</a></li>"
             )
         text = "New Software/AI roles:\n\n" + "\n\n".join(plain_lines)
-        html = f"<html><body><h3>New Software/AI roles</h3><ul>{''.join(html_lines)}</ul></body></html>"
+        html = f"<html><body><h3>New Software/AI roles</h3><ul>{''.join(html_lines)}</ul>"
     else:
         subject = "[Job Alerts] No new US jobs detected this hour"
         text = "No new US jobs detected this hour."
-        html = "<html><body><p>No new US jobs detected this hour.</p></body></html>"
+        html = "<html><body><p>No new US jobs detected this hour.</p>"
+
+    text += "\n\n---\nAdapter summary:\n" + "\n".join(notes)
+    html += "<hr><p><b>Adapter summary</b><br>" + "<br>".join(notes) + "</p></body></html>"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -581,13 +630,11 @@ def build_email(new_items: List[Dict[str,str]]) -> MIMEMultipart:
     msg.attach(MIMEText(html, "html"))
     return msg
 
+# ========= MAIN =========
 def main():
     seen = load_seen()
+    rows, notes = collect_all()
 
-    # scan
-    rows = run_scan()
-
-    # only alert on unseen
     new_items = []
     for r in rows:
         uid = jid(r["company"], r["title"], r["link"])
@@ -595,8 +642,7 @@ def main():
             seen.add(uid)
             new_items.append(r)
 
-    # always email (even if none)
-    msg = build_email(new_items)
+    msg = build_email(new_items, notes)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(SENDER, PASS)
@@ -606,4 +652,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
