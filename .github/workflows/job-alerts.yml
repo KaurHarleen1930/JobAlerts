@@ -2,11 +2,11 @@ name: Job Alerts (Hourly Email)
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour (UTC)
+    - cron: "0 * * * *"   # every hour UTC
   workflow_dispatch:
 
 permissions:
-  contents: read   # no repo writes needed
+  contents: read
 
 concurrency:
   group: job-alerts-hourly
@@ -18,7 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Restore cached seen.json (most recent)
       - name: Restore seen.json cache
         id: cache-restore
         uses: actions/cache/restore@v4
@@ -29,14 +28,11 @@ jobs:
             seen-${{ runner.os }}-${{ github.ref_name }}-
             seen-${{ runner.os }}-
 
-      # If cache missed, create an empty seen.json so the script can run
       - name: Ensure seen.json exists
         run: |
           if [ ! -f seen.json ]; then
             echo "[]" > seen.json
           fi
-          echo "Initial seen.json:"
-          cat seen.json
 
       - uses: actions/setup-python@v5
         with:
@@ -48,13 +44,12 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run monitor
-        run: python monitor.py
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
           TO_EMAIL:  ${{ secrets.TO_EMAIL }}
+        run: python monitor.py
 
-      # Save updated seen.json to a NEW cache key (restore picks the latest by prefix)
       - name: Save seen.json cache
         uses: actions/cache/save@v4
         with:
