@@ -6,7 +6,7 @@ A lightweight, API-first job watcher that monitors multiple company career syste
 
 Most job boards lag behind or rate-limit alerts, meaning candidates often see postings after hundreds of others have already applied. To solve this, Job Alerts Bot queries company career systems directly, surfacing new opportunities the moment they go live.
 
-This project also serves as an experiment in fully leveraging GitHub’s ecosystem — GitHub Actions for automation, secrets for secure credential storage, and caching for state management.
+This project also serves as an experiment in fully leveraging GitHub’s ecosystem, GitHub Actions for automation, secrets for secure credential storage, and caching for state management.
 
 ## Features
 
