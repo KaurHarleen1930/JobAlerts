@@ -1,39 +1,47 @@
 # JobAlerts
 
-A lightweight, API‑first job watcher that polls multiple company career systems (Workday, Greenhouse, Lever, native sites like Amazon/Google/Microsoft), filters for software/AI roles in the U.S. or Remote (US‑eligible), deduplicates against a local cache, and emails you whenever new matches appear.
+A lightweight, API-first job watcher that monitors multiple company career systems in real time, filters for U.S./Remote software & AI roles, and delivers email alerts with only new postings since the last run.
 
-Why this exists: Most job boards lag behind or rate‑limit alerts. This bot checks the sources directly so you can apply faster.
+## Why This Project Exists
 
-Features
+Most job boards lag behind or rate-limit alerts, meaning candidates often see postings after hundreds of others have already applied. To solve this, Job Alerts Bot queries company career systems directly, surfacing new opportunities the moment they go live.
 
-Multi‑source coverage: Amazon/AWS, Google, Microsoft, Workday tenants (Salesforce, Deloitte, EY, Wipro, IBM, Oracle), Greenhouse (Cognizant, Capgemini), Lever (LTIMindtree, HCL).
+This project also serves as an experiment in fully leveraging GitHub’s ecosystem — GitHub Actions for automation, secrets for secure credential storage, and caching for state management.
 
-Smart filtering: Keyword allowlist (software/AI/data) and seniority exclude list (e.g., senior, staff, principal, director).
+## Features
 
-U.S./Remote eligibility: Accepts locations in the United States or clearly marked “Remote (US)” variants.
+Multi-source coverage
+Supports direct APIs (Amazon, Google, Microsoft) and ATS providers like Workday, Greenhouse, and Lever.
 
-Duplicate suppression: Uses a stable SHA‑1 key on company|title|link backed by seen.json.
+Smart filtering
+Keyword allowlist (software, AI, data) and seniority exclusion list (senior, staff, director, principal).
 
-Email notifications: Sends a tidy HTML + plain‑text email listing only new postings since the last run, with an adapter summary.
+U.S./Remote eligibility
+Accepts job postings with U.S. or Remote (US-eligible) locations.
 
-Works locally and in GitHub Actions: Hourly runs recommended.
+Duplicate suppression
+Uses SHA-1 hashing on company|title|link to ensure each posting is unique.
 
-Sources Covered
+Email notifications
+Sends tidy HTML and plain-text digests of only new jobs since the last run.
 
-Direct APIs / native sites
+Runs locally or via GitHub Actions
+Configurable for hourly automated runs.
 
-Amazon Jobs (JSON API)
+Note: Not all companies allow automated requests. Some Workday tenants and career boards may block bots or return restricted pages.
 
-Google Careers (Next.js data blob)
+## How It Works
 
-Microsoft Careers (Next.js data blob)
+Adapters query each company or ATS provider.
 
-ATS providers
+Filters apply keyword matching and U.S./Remote eligibility checks.
 
-Workday (POST search API): Salesforce, Deloitte, EY, Wipro, IBM, Oracle
+Deduplication removes repeat jobs using a persistent seen.json.
 
-Greenhouse (Boards API): Cognizant, Capgemini
+Notifications are sent via Gmail SMTP (configured with secrets).
 
-Lever (Public postings API): LTIMindtree, HCL
+GitHub Actions runs the script every hour and updates the cache.
 
-You can add more companies quickly by creating another workday_adapter, greenhouse_adapter, or lever_adapter call in collect_all().
+## Future Improvements
+
+I plan to expand the project further by exploring more of GitHub’s advanced features such as dependency graphing, vulnerability scanning, and GitHub Pages/Projects for long-term roadmap planning.er, or lever_adapter call in collect_all().
