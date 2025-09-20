@@ -315,6 +315,65 @@ def collect_all() -> Tuple[List[Dict[str,str]], List[str]]:  # (rows, notes)
 
     s, r = lever_adapter("ltimindtree", "LTIMindtree"); rows += r; notes.append(f"{s}: {len(r)}")
     s, r = lever_adapter("hcl", "HCL America"); rows += r; notes.append(f"{s}: {len(r)}")
+    # Major H1B sponsors already in your script:
+    # Amazon, Google, Microsoft, IBM, Oracle are already included
+
+    # Financial Services (Heavy H1B sponsors)
+    s, r = workday_adapter("goldmansachs.wd5.myworkdayjobs.com", "goldmansachs", "External", "Goldman Sachs");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = workday_adapter("morganstanley.wd5.myworkdayjobs.com", "morganstanley", "External", "Morgan Stanley");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = workday_adapter("citi.wd5.myworkdayjobs.com", "citi", "2", "Citigroup");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = workday_adapter("wellsfargo.wd5.myworkdayjobs.com", "wellsfargo", "External", "Wells Fargo");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+
+    # Tech Companies (Known H1B sponsors)
+    s, r = greenhouse_adapter("stripe", "Stripe");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = greenhouse_adapter("coinbase", "Coinbase");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = greenhouse_adapter("databricks", "Databricks");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = greenhouse_adapter("snowflake", "Snowflake");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+
+    s, r = lever_adapter("uber", "Uber");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = lever_adapter("netflix", "Netflix");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = lever_adapter("palantir", "Palantir");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+
+    # Consulting Firms (Major H1B sponsors - already included)
+    # Deloitte, EY, Wipro, Cognizant, Capgemini are already in your script
+
+    # Additional Consulting/Services
+    s, r = workday_adapter("kpmg.wd1.myworkdayjobs.com", "kpmg", "External", "KPMG");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = workday_adapter("pwc.wd3.myworkdayjobs.com", "pwc", "Global", "PwC");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+
+    # Semiconductor/Hardware (High H1B sponsors)
+    s, r = workday_adapter("intel.wd1.myworkdayjobs.com", "intel", "External", "Intel");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
+    s, r = workday_adapter("amd.wd1.myworkdayjobs.com", "amd", "External", "AMD");
+    rows += r;
+    notes.append(f"{s}: {len(r)}")
 
     return (dedupe(rows), notes)
 
