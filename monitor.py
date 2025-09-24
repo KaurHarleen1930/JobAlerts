@@ -294,6 +294,284 @@ def workday_adapter(host: str, tenant: str, site: str, label: str) -> Tuple[str,
         uniq[r["link"]] = r
     return (status, list(uniq.values()))
 
+
+def indeed_adapter() -> Tuple[str, List[Dict[str, str]]]:
+    """Indeed job scraper - uses their public search pages (NO LOGIN REQUIRED)"""
+    results = []
+    status = "indeed: ok"
+
+    # Use more specific headers to avoid detection
+    indeed_headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'Referer': 'https://www.indeed.com/',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    }
+
+    for q in ["software engineer", "machine learning engineer", "data scientist"]:
+        try:
+            # Indeed's public search URL - no auth needed
+            url = f"https://www.indeed.com/jobs?q={requests.utils.quote(q)}&l=United+States&fromage=7&sort=date"
+
+            response = requests.get(url, headers=indeed_headers, timeout=TIMEOUT)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Indeed's current job card selectors (they change these occasionally)
+            job_cards = soup.find_all('div', attrs={'data-jk': True}) or soup.find_all('div', class_='job_seen_beacon')
+
+            for card in job_cards:
+                try:
+                    # Multiple selector strategies for robustness
+                    title_elem = (card.find('h2', class_='jobTitle') or
+                                  card.find('a', {'data-jk': True}) or
+                                  card.find('span', attrs={'title': True}))
+
+                    company_elem = (card.find('span', class_='companyName') or
+                                    card.find('a', attrs={'data-testid': 'company-name'}))
+
+                    location_elem = (card.find('div', class_='companyLocation') or
+                                     card.find('div', attrs={'data-testid': 'job-location'}))
+
+                    if not (title_elem and company_elem):
+                        continue
+
+                    # Extract text content
+                    if title_elem.find('a'):
+                        title = title_elem.find('a').get_text(strip=True)
+                        link_suffix = title_elem.find('a').get('href', '')
+                    else:
+                        title = title_elem.get_text(strip=True)
+                        link_suffix = card.get('data-jk', '')
+                        if link_suffix:
+                            link_suffix = f"/viewjob?jk={link_suffix}"
+
+                    company = company_elem.get_text(strip=True)
+                    location = location_elem.get_text(strip=True) if location_elem else "USA"
+
+                    # Build full URL
+                    if link_suffix and not link_suffix.startswith('http'):
+                        link = "https://www.indeed.com" + link_suffix
+                    else:
+                        link = link_suffix or ""
+
+                    if kw_match(title) and is_us_or_remote(location) and link:
+                        results.append({
+                            "company": f"{company} (Indeed)",
+                            "title": norm(title),
+                            "location": norm(location),
+                            "link": link
+                        })
+
+                except Exception as parse_error:
+                    continue  # Skip problematic cards
+
+            # Be respectful - longer delay for Indeed
+            time.sleep(2)
+
+        except Exception as e:
+            status = f"indeed: error {e.__class__.__name__}"
+
+    return (status, results)
+
+
+def dice_adapter() -> Tuple[str, List[Dict[str, str]]]:
+    """Dice.com tech job scraper"""
+    results = []
+    status = "dice: ok"
+
+    try:
+        # Dice API endpoint (they have a public API)
+        url = "https://job-search-api.svc.dhigroupinc.com/v1/dice/jobs/search"
+
+        for q in ["software", "machine learning", "AI", "data scientist"]:
+            params = {
+                'q': q,
+                'countryCode2': 'US',
+                'radius': '50',
+                'radiusUnit': 'mi',
+                'page': '1',
+                'pageSize': '50',
+                'facets': 'employmentType|postedDate|workFromHomeAvailability|employerType',
+                'fields': 'id|jobId|guid|summary|title|postedDate|modifiedDate|jobLocation|companyDisplayName|employmentType|isHighlighted|score|employerType|workFromHomeAvailability|isSponsored',
+                'culture': 'en',
+                'recommendations': 'true',
+                'interactionId': '0',
+                'fj': 'true',
+                'includeRemote': 'true'
+            }
+
+            headers = {
+                'User-Agent': HEADERS['User-Agent'],
+                'Accept': 'application/json',
+            }
+
+            response = requests.get(url, params=params, headers=headers, timeout=TIMEOUT)
+            data = response.json()
+
+            for job in data.get('data', []):
+                title = job.get('title', '')
+                company = job.get('companyDisplayName', '')
+                location = job.get('jobLocation', {}).get('displayName', 'USA')
+                job_id = job.get('detailsPageUrl', '') or f"https://www.dice.com/jobs/detail/{job.get('id', '')}"
+
+                if kw_match(title) and is_us_or_remote(location):
+                    results.append({
+                        "company": f"{company} (Dice)",
+                        "title": norm(title),
+                        "location": norm(location),
+                        "link": job_id
+                    })
+
+            time.sleep(0.5)
+
+    except Exception as e:
+        status = f"dice: error {e.__class__.__name__}"
+
+    return (status, results)
+
+
+def glassdoor_adapter() -> Tuple[str, List[Dict[str, str]]]:
+    """Glassdoor job scraper - CAUTION: May require solving CAPTCHAs"""
+    results = []
+    status = "glassdoor: ok"
+
+    # Glassdoor is more aggressive about blocking bots
+    glassdoor_headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.glassdoor.com/',
+        'Cache-Control': 'max-age=0',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin'
+    }
+
+    # Try fewer searches to avoid detection
+    for q in ["software engineer", "machine learning"]:  # Reduced queries
+        try:
+            # Simplified Glassdoor search URL
+            base_url = "https://www.glassdoor.com/Job/us-software-jobs-SRCH_IL.0,2_IN1_KO3,11.htm"
+            params = {
+                'includeNoSalaryJobs': 'true',
+                'pgc': '1',  # Page 1 only
+                'fromAge': '7',
+                'minSalary': '0',
+                'radius': '100'
+            }
+
+            # Add keyword if not default
+            if q != "software engineer":
+                params['sc.keyword'] = q
+
+            url = base_url + "?" + "&".join([f"{k}={v}" for k, v in params.items()])
+
+            response = requests.get(url, headers=glassdoor_headers, timeout=TIMEOUT)
+
+            # Check if we got blocked
+            if response.status_code == 429 or "blocked" in response.text.lower():
+                status = "glassdoor: rate limited or blocked"
+                break
+
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Multiple selector strategies for Glassdoor's changing layout
+            job_cards = (soup.find_all('div', attrs={'data-test': 'jobListing'}) or
+                         soup.find_all('li', class_='react-job-listing') or
+                         soup.find_all('div', class_='job-search-card'))
+
+            for card in job_cards:
+                try:
+                    # Try different selector patterns
+                    title_elem = (card.find('a', attrs={'data-test': 'job-link'}) or
+                                  card.find('a', class_='jobLink') or
+                                  card.find('a', attrs={'data-id': True}))
+
+                    company_elem = (card.find('span', attrs={'data-test': 'employer-name'}) or
+                                    card.find('div', class_='employerName') or
+                                    card.find('span', class_='employer'))
+
+                    location_elem = (card.find('span', attrs={'data-test': 'job-location'}) or
+                                     card.find('div', class_='loc') or
+                                     card.find('span', class_='location'))
+
+                    if not (title_elem and company_elem):
+                        continue
+
+                    title = title_elem.get_text(strip=True)
+                    company = company_elem.get_text(strip=True)
+                    location = location_elem.get_text(strip=True) if location_elem else "USA"
+
+                    # Build link
+                    link_href = title_elem.get('href', '')
+                    if link_href and not link_href.startswith('http'):
+                        link = "https://www.glassdoor.com" + link_href
+                    else:
+                        link = link_href or ""
+
+                    if kw_match(title) and is_us_or_remote(location) and link:
+                        results.append({
+                            "company": f"{company} (Glassdoor)",
+                            "title": norm(title),
+                            "location": norm(location),
+                            "link": link
+                        })
+
+                except Exception:
+                    continue
+
+            # Longer delay for Glassdoor - they're strict
+            time.sleep(3)
+
+        except Exception as e:
+            if "429" in str(e) or "blocked" in str(e).lower():
+                status = "glassdoor: rate limited - try later"
+                break
+            status = f"glassdoor: error {e.__class__.__name__}"
+
+    return (status, results)
+
+
+def ycombinator_adapter() -> Tuple[str, List[Dict[str, str]]]:
+    """Y Combinator Work at a Startup jobs"""
+    results = []
+    try:
+        # YC's job board API
+        url = "https://www.workatstartup.com/api/jobs"
+        params = {
+            'query': 'software OR "machine learning" OR "data science" OR AI',
+            'location': 'United States',
+            'remote': True
+        }
+
+        data = http_json("GET", url, params=params)
+
+        for job in data.get('jobs', []):
+            title = job.get('role', '')
+            company = job.get('company', {}).get('name', '')
+            location = job.get('location_restriction', 'Remote')
+            link = f"https://www.workatstartup.com/jobs/{job.get('id', '')}"
+
+            if kw_match(title) and (is_us_or_remote(location) or 'remote' in location.lower()):
+                results.append({
+                    "company": f"{company} (YC Startup)",
+                    "title": norm(title),
+                    "location": norm(location),
+                    "link": link
+                })
+
+        return ("yc: ok", results)
+
+    except Exception as e:
+        return (f"yc: error {e.__class__.__name__}", results)
+
 # ========= COMPANY SOURCES =========
 def collect_all() -> Tuple[List[Dict[str,str]], List[str]]:  # (rows, notes)
     rows: List[Dict[str,str]] = []
@@ -319,6 +597,10 @@ def collect_all() -> Tuple[List[Dict[str,str]], List[str]]:  # (rows, notes)
     # Amazon, Google, Microsoft, IBM, Oracle are already included
 
     # Financial Services (Heavy H1B sponsors)
+    s, r = indeed_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
+    s, r = dice_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
+    s, r = glassdoor_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
+    s, r = ycombinator_adapter(); rows += r; notes.append(f"{s}: {len(r)}")
     s, r = workday_adapter("goldmansachs.wd5.myworkdayjobs.com", "goldmansachs", "External", "Goldman Sachs");
     rows += r;
     notes.append(f"{s}: {len(r)}")
